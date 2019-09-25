@@ -25,7 +25,7 @@ def orica(data, weights=None, onlineWhitening=False, numpass=1, block_ica=8, blo
         EEG brain sources are usually supergaussian
         Subgaussian sources are motstly artifact or noise
     :param evalconverg:  [0|1] evaluate convergence such as Non-Stationarity Index
-    :param verbose:  ['on'|'off'] give ascii messages  (default -> 'off')
+    :param verbose:  ['on'|'off'] give ascii messages  (default  -> 'off')
     :return:
     """
 
@@ -77,7 +77,21 @@ def orica(data, weights=None, onlineWhitening=False, numpass=1, block_ica=8, blo
         state.icasphere = 2.0 * npla.inv(spla.sqrtm(float(np.cov(data)))) # find the "sphering" matrix = spher()
         data = state.icasphere * data
 
+def AppyAndUpdateWhiteningMatrix(icasphere, blockdata, forgettingfactor):
+    """
+    Online Recursive Independent Component Analysis for Real-time
+        Source Separation of High-density EEG
 
+    :param icasphere: shape = (num_antenna, num_antenna)
+    :param blockdata:  shape = (num_antenna, num_samples)
+    :param forgettingfactor:  scalar between 0 and 1
+    :return:
+    """
+    v = np.matmul(icasphere, blockdata)
+    ExpectedOuterProduct = np.einsum('ij,kj->jij', v,np.conj(v))
+    QWhite = forgettingfactor/ (1 - forgettingfactor) + np.trace(v.T * v) / nPts
+    state.icasphere = 1 / lambda_avg * (state.icasphere - v * v.T / nPts / QWhite * state.icasphere)
+    return icasphere
 
 def dynamicWhitening(blockdata, dataRange, state, adaptiveFF):
     nPts = blockdata.shape[1]
