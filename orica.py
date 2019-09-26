@@ -77,7 +77,37 @@ def orica(data, weights=None, onlineWhitening=False, numpass=1, block_ica=8, blo
         state.icasphere = 2.0 * npla.inv(spla.sqrtm(float(np.cov(data)))) # find the "sphering" matrix = spher()
         data = state.icasphere * data
 
-def AppyAndUpdateWhiteningMatrix(icasphere, blockdata, forgettingfactor):
+def get_WhiteningMatrix(blockdata):
+    num_antenna, num_samples = blockdata.shape
+    AutocorrelationMatrix = np.matmul(blockdata, np.conj(blockdata.T)) / num_samples
+    D, U = npla.eig(AutocorrelationMatrix)
+
+    return np.matmul(np.diag(1./np.sqrt(D)), np.conj(U.T))
+
+def JadeWhiten(X):
+    X-=X.mean(1,keepdims=True)
+    n,T = X.shape
+
+    m = n
+
+    if m<n:
+        #assumes white noise
+        D,U     = npla.eig((X.dot(X.conj().T))/T)
+        k       = np.argsort(D)
+        puiss   = D[k]
+        ibl     = np.sqrt(puiss[-m:]-puiss[:-m].mean())
+        bl      = 1/ibl
+        W       = np.diag(bl).dot(U[:,k[-m:]].conj().T)
+        IW      = U[:,k[-m:]].dot(np.diag(ibl))
+    else:
+        #assumes no noise
+        IW      = spla.sqrtm((X.dot(X.conj().T))/T)
+        W       = npla.inv(IW)
+
+    Y    = W.dot(X)
+    return Y
+
+def AppyAndUpdateWhiteningMatrix(blockdata, icasphere, forgettingfactor):
     """
     Online Recursive Independent Component Analysis for Real-time
         Source Separation of High-density EEG
@@ -85,13 +115,38 @@ def AppyAndUpdateWhiteningMatrix(icasphere, blockdata, forgettingfactor):
     :param icasphere: shape = (num_antenna, num_antenna)
     :param blockdata:  shape = (num_antenna, num_samples)
     :param forgettingfactor:  scalar between 0 and 1
+        as forgettingfactor approaches 1, icaweight never updates, new information is irrelevant
+        as forgettingfactor approaches 0, icaweight doesnt converge and learning becomes unstable
     :return:
     """
-    v = np.matmul(icasphere, blockdata)
-    ExpectedOuterProduct = np.einsum('ij,kj->jij', v,np.conj(v))
-    QWhite = forgettingfactor/ (1 - forgettingfactor) + np.trace(v.T * v) / nPts
-    state.icasphere = 1 / lambda_avg * (state.icasphere - v * v.T / nPts / QWhite * state.icasphere)
-    return icasphere
+    whiten_blockdata = np.matmul(icasphere, blockdata)
+    num_antenna, num_samples = whiten_blockdata.shape
+    AutocorrelationMatrix = np.matmul(whiten_blockdata, np.conj(whiten_blockdata.T))/num_samples
+    QWhite = forgettingfactor/ (1. - forgettingfactor) + AutocorrelationMatrix
+    icasphere = 1. / forgettingfactor * (icasphere - np.matmul(np.average(np.conj(whiten_blockdata)*whiten_blockdata) / QWhite, icasphere))
+    return whiten_blockdata, icasphere
+
+
+def AppyAndUpdateWhiteningMatrix_Cardoso(blockdata, icasphere , learningrate):
+    """
+    Equivariant adaptive source separation
+
+    :param icasphere: shape = (num_antenna, num_antenna)
+    :param blockdata:  shape = (num_antenna, num_samples)
+    :param learningrate:  scalar between 0 and 1
+        as forgettingfactor approaches 0, icaweight never updates, new information is irrelevant
+        as forgettingfactor approaches 1, learning becomes unstable
+    :return:
+    """
+
+    num_antenna, num_samples = blockdata.shape
+    assert icasphere.shape == (num_antenna, num_antenna)
+
+    whiten_blockdata = np.matmul(icasphere, blockdata)  # shape == (num_antenna, num_samples)
+    AutocorrelationMatrix = np.matmul(whiten_blockdata, np.conj(whiten_blockdata.T))/num_samples  # shape == (num_antenna, num_antenna)
+    icasphere = (1+learningrate)* icasphere - learningrate * np.matmul(AutocorrelationMatrix,icasphere)
+
+    return whiten_blockdata, icasphere
 
 def dynamicWhitening(blockdata, dataRange, state, adaptiveFF):
     nPts = blockdata.shape[1]
@@ -140,7 +195,7 @@ def dynamicOrica(blockdata, state, dataRange, adaptiveFF, evalConvergence, nlfun
 
     if adaptiveFF.profile == 'cooling':
         state.lambda_k = genCoolingFF(state.counter + dataRange, adaptiveFF.gamma, adaptiveFF.lambda_0)
-        if state.lambda_k(1) < adaptiveFF.lambda_const
+        if state.lambda_k(1) < adaptiveFF.lambda_const:
             state.lambda_k = np.tile(adaptiveFF.lambda_const, (1, nPts))
         state.counter = state.counter + nPts
 
