@@ -84,15 +84,19 @@ def get_WhiteningMatrix(blockdata):
 
     return np.matmul(np.diag(1./np.sqrt(D)), np.conj(U.T))
 
-def JadeWhiten(X):
-    X-=X.mean(1,keepdims=True)
-    n,T = X.shape
+def Whitten(blockdata):
+    """
 
+    :param blockdata:  shape == (num_antenna, num_samples)
+    :return:
+    """
+    blockdata-=blockdata.mean(1, keepdims=True)
+    n,T = blockdata.shape
     m = n
 
     if m<n:
         #assumes white noise
-        D,U     = npla.eig((X.dot(X.conj().T))/T)
+        D,U     = npla.eig((blockdata.dot(blockdata.conj().T)) / T)
         k       = np.argsort(D)
         puiss   = D[k]
         ibl     = np.sqrt(puiss[-m:]-puiss[:-m].mean())
@@ -101,10 +105,10 @@ def JadeWhiten(X):
         IW      = U[:,k[-m:]].dot(np.diag(ibl))
     else:
         #assumes no noise
-        IW      = spla.sqrtm((X.dot(X.conj().T))/T)
+        IW      = spla.sqrtm((blockdata.dot(blockdata.conj().T)) / T)
         W       = npla.inv(IW)
 
-    Y    = W.dot(X)
+    Y    = W.dot(blockdata)
     return Y
 
 def AppyAndUpdateWhiteningMatrix(blockdata, icasphere, forgettingfactor):
@@ -147,6 +151,42 @@ def AppyAndUpdateWhiteningMatrix_Cardoso(blockdata, icasphere , learningrate):
     icasphere = (1+learningrate)* icasphere - learningrate * np.matmul(AutocorrelationMatrix,icasphere)
 
     return whiten_blockdata, icasphere
+
+def ApplyAndUpdateUnmixingMatrix(blockdata, icaweights, lambda_k, nlfunc=None):
+    # update weight matrix using online recursive ICA block update rule
+
+    num_antenna, num_samples = blockdata.shape
+    assert icaweights.shape == (num_antenna, num_antenna)
+
+    # compute source activation using previous weight matrix
+    unmixed_blockdata = np.matmul(icaweights, blockdata)
+
+    # choose nonlinear functions for super- vs. sub-gaussian
+    if nlfunc is None:
+        # by default, the first half of the outputs are subgaussian sources,
+        # the other half are supergaussian sources
+        f = np.zeros(num_antenna, num_samples)
+        num_subgaussians = num_antenna // 2
+        f[:num_subgaussians,:]  = -2 * np.tanh(unmixed_blockdata[:num_subgaussians,:])  # Supergaussian
+        f[num_subgaussians:,:] = 2 * np.tanh(unmixed_blockdata[num_subgaussians:,:])  # Subgaussian
+
+    elif type(nlfunc) is list:
+        f = np.zeros(num_antenna, num_samples)
+        assert len(nlfunc) == num_antenna
+        for i, fn in enumerate(nlfunc):
+            f[i,:]  = fn(unmixed_blockdata[i,:])
+
+    else:
+        f = nlfunc(unmixed_blockdata)
+
+    lambda_prod = np.prod(1. / (1 - lambda_k))
+    Q = 1 + lambda_k * (np.dot(f, unmixed_blockdata, axis=1) - 1)
+    icaweights = lambda_prod * (icaweights - unmixed_blockdata * np.diag(lambda_k / Q) * f.T * icaweights)
+
+    [V, D] = npla.eig(np.matmul(icaweights, np.conj(icaweights.T)))
+    icaweights = V / np.sqrt(D) * V.T * icaweights
+
+    return unmixed_blockdata, icaweights
 
 def dynamicWhitening(blockdata, dataRange, state, adaptiveFF):
     nPts = blockdata.shape[1]
