@@ -165,100 +165,32 @@ def ApplyAndUpdateUnmixingMatrix(blockdata, icaweights, lambda_k, nlfunc=None):
     if nlfunc is None:
         # by default, the first half of the outputs are subgaussian sources,
         # the other half are supergaussian sources
-        f = np.zeros(num_antenna, num_samples)
-        num_subgaussians = num_antenna // 2
-        f[:num_subgaussians,:]  = -2 * np.tanh(unmixed_blockdata[:num_subgaussians,:])  # Supergaussian
-        f[num_subgaussians:,:] = 2 * np.tanh(unmixed_blockdata[num_subgaussians:,:])  # Subgaussian
+        f_blockdata = np.zeros(num_antenna, num_samples)
+        num_supergaussians = num_antenna // 2
+        f_blockdata[:num_supergaussians,:]  = -2 * np.tanh(unmixed_blockdata[:num_supergaussians,:])  # Supergaussian
+        f_blockdata[num_supergaussians:,:] = np.tanh(unmixed_blockdata[num_supergaussians:,:]) - unmixed_blockdata[num_supergaussians:,:] # Subgaussian
 
     elif type(nlfunc) is list:
-        f = np.zeros(num_antenna, num_samples)
+        f_blockdata = np.zeros(num_antenna, num_samples)
         assert len(nlfunc) == num_antenna
         for i, fn in enumerate(nlfunc):
-            f[i,:]  = fn(unmixed_blockdata[i,:])
+            f_blockdata[i,:]  = fn(unmixed_blockdata[i,:])
 
     else:
-        f = nlfunc(unmixed_blockdata)
+        f_blockdata = nlfunc(unmixed_blockdata)
 
     lambda_prod = np.prod(1. / (1 - lambda_k))
-    Q = 1 + lambda_k * (np.dot(f, unmixed_blockdata, axis=1) - 1)
-    icaweights = lambda_prod * (icaweights - unmixed_blockdata * np.diag(lambda_k / Q) * f.T * icaweights)
+    Q = lambda_k * (np.dot(np.conj(f_blockdata), unmixed_blockdata, axis=1))
+    A = np.matmul(np.diag(lambda_k / Q), np.conj(f_blockdata.T))
+    B = np.matmul(unmixed_blockdata, A)
+    icaweights = lambda_prod * (icaweights -  np.matmul(B, icaweights))
 
+    # orthogonalize matrix
     [V, D] = npla.eig(np.matmul(icaweights, np.conj(icaweights.T)))
     icaweights = V / np.sqrt(D) * V.T * icaweights
 
     return unmixed_blockdata, icaweights
 
-def dynamicWhitening(blockdata, dataRange, state, adaptiveFF):
-    nPts = blockdata.shape[1]
-    if adaptiveFF.profile == 'cooling':
-        lambd = genCoolingFF(state.counter+dataRange, adaptiveFF.gamma, adaptiveFF.lambda_0)
-        if lambd (1) < adaptiveFF.lambda_const:
-            lambd = np.tile(adaptiveFF.lambda_const, (1, nPts))
-    elif adaptiveFF.profile == 'constant':
-        lambd = np.tile(adaptiveFF.lambda_const, (1, nPts))
-    elif adaptiveFF.profile == 'adaptive':
-        lambd = np.tile(state.lambda_k[-1],(1,nPts))
-
-
-    v = state.icasphere * blockdata # pre-whitened data
-    median_idx = np.ceil(len(lambd)/2)
-    lambda_avg = 1 - lambd[median_idx]   # median lambda
-    QWhite = lambda_avg/(1-lambda_avg) + np.trace(v.T * v) / nPts
-    state.icasphere = 1/lambda_avg * (state.icasphere - v * v.T / nPts / QWhite * state.icasphere)
-
-    return state
-
-def dynamicOrica(blockdata, state, dataRange, adaptiveFF, evalConvergence, nlfunc):
-    [nChs, nPts] = blockdata.shape
-    f = np.zeros(nChs, nPts)
-
-    # compute source activation using previous weight matrix
-    y = state.icaweights * blockdata
-
-    # choose nonlinear functions for super- vs. sub-gaussian
-    if nlfunc is None:
-        notkurtsign = np.logical_not(state.kurtsign)
-        f[state.kurtsign,:]  = -2 * np.tanh(y[state.kurtsign,:]) # Supergaussian
-        f[notkurtsign,:] = 2 * np.tanh(y[notkurtsign,:]) # Subgaussian
-    else:
-        f = nlfunc(y)
-
-    # compute Non-Stationarity Index (nonStatIdx) and variance of source dynamics (Var)
-    if evalConvergence.profile:
-        modelFitness = np.eye(nChs) + y * f.T/nPts
-        variance = blockdata * blockdata
-        if state.Rn is None:
-            state.Rn = modelFitness
-        else:
-            state.Rn = (1 - evalConvergence.leakyAvgDelta) * state.Rn + evalConvergence.leakyAvgDelta * modelFitness
-        state.nonStatIdx = npla.norm(state.Rn, 'fro')
-
-    if adaptiveFF.profile == 'cooling':
-        state.lambda_k = genCoolingFF(state.counter + dataRange, adaptiveFF.gamma, adaptiveFF.lambda_0)
-        if state.lambda_k(1) < adaptiveFF.lambda_const:
-            state.lambda_k = np.tile(adaptiveFF.lambda_const, (1, nPts))
-        state.counter = state.counter + nPts
-
-    elif adaptiveFF.profile == 'constant':
-        state.lambda_k = np.tile(adaptiveFF.lambda_const,(1,nPts))
-    elif adaptiveFF.profile == 'adaptive':
-        if state.minNonStatIdx is None:
-            state.minNonStatIdx = state.nonStatIdx
-        state.minNonStatIdx = max(min(state.minNonStatIdx, state.nonStatIdx),1)
-        ratioOfNormRn = state.nonStatIdx/state.minNonStatIdx
-        state.lambda_k = genAdaptiveFF(dataRange,state.lambda_k,adaptiveFF.decayRateAlpha,adaptiveFF.upperBoundBeta,adaptiveFF.transBandWidthGamma,adaptiveFF.transBandCenter,ratioOfNormRn);
-
-
-    # update weight matrix using online recursive ICA block update rule
-    lambda_prod = np.prod(1. / (1 - state.lambda_k))
-    Q = 1 + state.lambda_k * (np.dot(f, y, axis=1) - 1)
-    state.icaweights = lambda_prod * (state.icaweights - y * np.diag(state.lambda_k / Q) * f.T * state.icaweights);
-
-    #
-    [V, D] = npla.eig(state.icaweights * state.icaweights.T)
-    state.icaweights = V / np.sqrt(D) * V.T * state.icaweights
-
-    return state
 
 def genCoolingFF(t,gamma,lambda_0):
     # lambda = lambda_0 / sample^gamma
