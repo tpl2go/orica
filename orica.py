@@ -180,10 +180,11 @@ def ApplyAndUpdateUnmixingMatrix(blockdata, icaweights, lambda_k, nlfunc=None):
         f_blockdata = nlfunc(unmixed_blockdata)
 
     lambda_prod = np.prod(1. / (1 - lambda_k))
-    Q = lambda_k * (np.dot(np.conj(f_blockdata), unmixed_blockdata, axis=1))
-    A = np.matmul(np.diag(lambda_k / Q), np.conj(f_blockdata.T))
-    B = np.matmul(unmixed_blockdata, A)
-    icaweights = lambda_prod * (icaweights -  np.matmul(B, icaweights))
+    denominator = (1-lambda_k)/lambda_k  + (np.sum(np.conj(f_blockdata)*unmixed_blockdata, axis=1))
+    assert denominator.size == num_samples
+    ExpectedOuterProduct = np.einsum('ij,kj->ikj', unmixed_blockdata, np.conj(f_blockdata))  # shape == (num_antenna, num_antenna, num_samples)
+    fractions = np.sum(ExpectedOuterProduct/denominator,axis=2)  # shape == (num_antenna, num_antenna)
+    icaweights = lambda_prod * (icaweights -  np.matmul(fractions, icaweights))
 
     # orthogonalize matrix
     [V, D] = npla.eig(np.matmul(icaweights, np.conj(icaweights.T)))
